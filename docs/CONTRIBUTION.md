@@ -10,3 +10,10 @@
     feature/<workflow>
     fix/<work-fix>
     bug/<bug-detect>
+
+    Main/Production Branch: main or master
+    Development Branch: dev
+
+    Feature Branch: feature/login-form (created from dev)
+    Bug Fix: bugfix/button-color (created from dev)
+    Hotfix: hotfix/login-crash (created from main) 
