@@ -12,7 +12,8 @@ while True:
     if not ret:
         print("Cannot access frames.. Exiting...")
         break
-    cv.imshow("Live Video",frame)
+    greyscale = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    cv.imshow("Live Video (Greyscale)",greyscale)
 
     if cv.waitKey(1) == ord("q"):
         break
