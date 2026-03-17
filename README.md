@@ -13,7 +13,13 @@ This project simulates a federated learning workflow for face recognition (physi
 ## Python version
 Use **Python 3.12** for the full project.
 
-## Install
+## Quick fix for `cv2` import errors
+```powershell
+.\setup_env.ps1
+```
+This creates `.venv`, installs dependencies, and verifies `cv2` + `mediapipe` imports.
+
+## Manual install
 ```powershell
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
