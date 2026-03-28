@@ -1,13 +1,15 @@
 import argparse
-import sys
 import time
+import tkinter as tk
 from collections import deque
 from pathlib import Path
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import mediapipe as mp
 import numpy as np
+from PIL import Image, ImageTk
 
 from common import (
     LEFT_EYE_IDX,
@@ -107,14 +109,19 @@ class FederatedClient:
         self.blink_timestamps: List[float] = []
         self.rapid_window = deque(maxlen=20)
 
-        self.pattern_capture_mode: Optional[str] = None  # set | verify
+        self.pattern_capture_mode: Optional[str] = None
         self.pattern_capture_start = 0.0
         self.pattern_capture_timestamps: List[float] = []
         self.pattern_window_seconds = 10.0
         self.pending_file_action: Optional[Tuple[str, Path]] = None
         self.last_message = "Ready"
+        self.server_state = "Connecting"
+        self.current_ear = 0.0
 
         self.frame_brightness: deque = deque(maxlen=90)
+
+    def set_status(self, message: str):
+        self.last_message = message
 
     def register_to_server(self):
         try:
@@ -128,11 +135,14 @@ class FederatedClient:
                 self.recognition_threshold = float(gm.get("recognition_threshold", self.recognition_threshold))
                 self.ear_blink_threshold = float(gm.get("ear_blink_threshold", self.ear_blink_threshold))
                 self.server_model_version = int(gm.get("version", self.server_model_version))
-                print(f"[Client:{self.client_id}] Registered. Server model v{self.server_model_version}")
+                self.server_state = "Connected"
+                self.set_status(f"Connected to hub. Model v{self.server_model_version}")
             else:
-                print(f"[Client:{self.client_id}] Register failed: {resp}")
-        except Exception as exc:
-            print(f"[Client:{self.client_id}] Server unavailable ({exc}). Running local-only mode.")
+                self.server_state = "Unavailable"
+                self.set_status("Hub registration failed. Running in local-only mode.")
+        except Exception:
+            self.server_state = "Unavailable"
+            self.set_status("Hub unavailable. Running in local-only mode.")
 
     def push_federated_update(self):
         now = time.time()
@@ -141,13 +151,11 @@ class FederatedClient:
 
         if self.frame_brightness:
             mean_b = float(np.mean(self.frame_brightness))
-            # Tiny adaptation proposal from local environment.
             local_rec = max(0.22, min(0.45, 0.33 + ((130.0 - mean_b) / 1000.0)))
         else:
             local_rec = self.recognition_threshold
 
         local_ear = max(0.16, min(0.28, self.ear_blink_threshold))
-
         payload = {
             "action": "submit_update",
             "client_id": self.client_id,
@@ -164,28 +172,33 @@ class FederatedClient:
                 self.recognition_threshold = float(gm["recognition_threshold"])
                 self.ear_blink_threshold = float(gm["ear_blink_threshold"])
                 self.server_model_version = int(gm["version"])
+                self.server_state = "Connected"
         except Exception:
-            pass
+            self.server_state = "Unavailable"
+
         self.last_federated_push = now
 
-    def start_registration(self):
-        name = input("Enter local identity name for registration: ").strip()
+    def start_registration(self, name: str) -> bool:
+        name = name.strip()
         if not name:
-            print("Name cannot be empty.")
-            return
+            return False
         self.registering_name = name
         self.registration_samples = []
-        self.last_message = f"Registering {name}... keep face centered"
-        print(f"[Client:{self.client_id}] Registration started for '{name}'")
+        self.set_status(f"Registering {name}. Keep the face centered.")
+        return True
+
+    def toggle_recognition(self):
+        self.recognition_mode = not self.recognition_mode
+        self.set_status(f"Recognition {'enabled' if self.recognition_mode else 'disabled'}.")
 
     def start_pattern_capture(self, mode: str):
         self.pattern_capture_mode = mode
         self.pattern_capture_start = time.time()
         self.pattern_capture_timestamps = []
         if mode == "set":
-            self.last_message = "Blink password capture started (10s)"
+            self.set_status("Blink password capture started for 10 seconds.")
         else:
-            self.last_message = "Blink verification started (10s)"
+            self.set_status("Blink verification started for 10 seconds.")
 
     def handle_blink_event(self, now_ts: float):
         self.blink_timestamps.append(now_ts)
@@ -198,13 +211,13 @@ class FederatedClient:
         if self.pattern_capture_mode and (now_ts - self.pattern_capture_start) <= self.pattern_window_seconds:
             self.pattern_capture_timestamps.append(now_ts)
 
-    def finalize_pattern_capture_if_needed(self):
+    def finalize_pattern_capture_if_needed(self) -> Optional[Tuple[str, str]]:
         if not self.pattern_capture_mode:
-            return
+            return None
 
         elapsed = time.time() - self.pattern_capture_start
         if elapsed < self.pattern_window_seconds:
-            return
+            return None
 
         pattern = blink_pattern_from_timestamps(
             self.pattern_capture_timestamps,
@@ -217,50 +230,261 @@ class FederatedClient:
 
         if mode == "set":
             self.store.set_blink_password(pattern)
-            self.last_message = f"Blink password set. Pattern signature: {pattern}"
-            print(f"[Client:{self.client_id}] Blink password set.")
-            return
+            self.set_status(f"Blink password saved. Pattern signature: {pattern}")
+            return ("info", "Blink password saved successfully.")
 
         is_valid = self.store.verify_blink_password(pattern)
-        if is_valid:
-            self.last_message = "Blink verification passed"
-            print(f"[Client:{self.client_id}] Blink verification passed.")
-            if self.pending_file_action:
-                action, path = self.pending_file_action
-                self.pending_file_action = None
-                self._run_file_action(action, path, pattern)
-        else:
-            self.last_message = "Blink verification failed"
+        if not is_valid:
             self.pending_file_action = None
-            print(f"[Client:{self.client_id}] Blink verification failed.")
+            self.set_status("Blink verification failed.")
+            return ("error", "Blink verification failed.")
 
-    def _run_file_action(self, action: str, path: Path, pattern_secret: str):
+        self.set_status("Blink verification passed.")
+        if self.pending_file_action:
+            action, path = self.pending_file_action
+            self.pending_file_action = None
+            return self._run_file_action(action, path, pattern)
+        return ("info", "Blink verification passed.")
+
+    def queue_lock(self, path: Path):
+        self.pending_file_action = ("lock", path)
+        self.start_pattern_capture("verify")
+
+    def queue_unlock(self, path: Path):
+        self.pending_file_action = ("unlock", path)
+        self.start_pattern_capture("verify")
+
+    def _run_file_action(self, action: str, path: Path, pattern_secret: str) -> Tuple[str, str]:
         try:
             if action == "lock":
                 out = lock_file_with_secret(path, pattern_secret)
-                self.last_message = f"File locked: {out.name}"
-                print(f"[Client:{self.client_id}] Locked: {out}")
-            elif action == "unlock":
+                self.set_status(f"File locked: {out.name}")
+                return ("info", f"File locked successfully:\n{out}")
+            if action == "unlock":
                 out = unlock_file_with_secret(path, pattern_secret)
-                self.last_message = f"File unlocked: {out.name}"
-                print(f"[Client:{self.client_id}] Unlocked: {out}")
+                self.set_status(f"File unlocked: {out.name}")
+                return ("info", f"File unlocked successfully:\n{out}")
+            return ("error", f"Unknown file action: {action}")
         except Exception as exc:
-            self.last_message = f"File action failed: {exc}"
-            print(f"[Client:{self.client_id}] File action failed: {exc}")
+            self.set_status(f"File action failed: {exc}")
+            return ("error", f"File action failed:\n{exc}")
 
-    def run(self):
-        self.register_to_server()
 
-        cap = cv2.VideoCapture(self.args.camera, cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            print("Unable to open camera.")
-            sys.exit(1)
+class FederatedClientGUI:
+    def __init__(self, client: FederatedClient):
+        self.client = client
+        self.cap: Optional[cv2.VideoCapture] = None
+        self.face_mesh = None
+        self.closed = False
+        self.video_image = None
+        self.dialog_cooldown_until = 0.0
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.args.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.args.height)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        self.root = tk.Tk()
+        self.root.title(f"Federated Client - {self.client.client_id}")
+        self.root.geometry("1280x820")
+        self.root.configure(bg="#f4f6fb")
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        face_mesh = mp.solutions.face_mesh.FaceMesh(
+        self.status_var = tk.StringVar(value="Starting client...")
+        self.server_var = tk.StringVar(value="Hub: connecting")
+        self.model_var = tk.StringVar(value="Model v1")
+        self.recognition_var = tk.StringVar(value="Recognition: OFF")
+        self.identity_var = tk.StringVar(value="Recognized: Unknown")
+        self.eye_var = tk.StringVar(value="EAR: 0.000")
+        self.rapid_var = tk.StringVar(value="Rapid eye closure: NO")
+        self.capture_var = tk.StringVar(value="Blink capture: idle")
+        self.profiles_var = tk.StringVar(value=self._profiles_text())
+
+        self._build_layout()
+
+    def _build_layout(self):
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure("Card.TFrame", background="#ffffff")
+        style.configure("Panel.TLabelframe", background="#ffffff")
+        style.configure("Panel.TLabelframe.Label", background="#ffffff", foreground="#1c274c")
+        style.configure("Info.TLabel", background="#ffffff", foreground="#1f2d3d", font=("Segoe UI", 10))
+        style.configure("Title.TLabel", background="#f4f6fb", foreground="#14213d", font=("Segoe UI", 16, "bold"))
+
+        container = ttk.Frame(self.root, padding=16)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=3)
+        container.columnconfigure(1, weight=2)
+        container.rowconfigure(1, weight=1)
+
+        header = ttk.Label(
+            container,
+            text=f"Federated Learning Client Dashboard - {self.client.client_id}",
+            style="Title.TLabel",
+        )
+        header.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        video_card = ttk.Frame(container, style="Card.TFrame", padding=12)
+        video_card.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
+        video_card.columnconfigure(0, weight=1)
+        video_card.rowconfigure(0, weight=1)
+
+        self.video_label = tk.Label(video_card, bg="#101827", bd=0, relief=tk.FLAT)
+        self.video_label.grid(row=0, column=0, sticky="nsew")
+
+        side = ttk.Frame(container)
+        side.grid(row=1, column=1, sticky="nsew")
+        side.columnconfigure(0, weight=1)
+
+        summary = ttk.LabelFrame(side, text="Live Summary", style="Panel.TLabelframe", padding=12)
+        summary.grid(row=0, column=0, sticky="ew")
+
+        for idx, variable in enumerate(
+            [
+                self.server_var,
+                self.model_var,
+                self.recognition_var,
+                self.identity_var,
+                self.eye_var,
+                self.rapid_var,
+                self.capture_var,
+            ]
+        ):
+            ttk.Label(summary, textvariable=variable, style="Info.TLabel").grid(row=idx, column=0, sticky="w", pady=2)
+
+        actions = ttk.LabelFrame(side, text="Client Actions", style="Panel.TLabelframe", padding=12)
+        actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+
+        ttk.Button(actions, text="Register Face", command=self.on_register).grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=6)
+        self.recognition_button = ttk.Button(actions, text="Enable Recognition", command=self.on_toggle_recognition)
+        self.recognition_button.grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=6)
+        ttk.Button(actions, text="Set Blink Password", command=self.on_set_blink_password).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=6)
+        ttk.Button(actions, text="Verify Blink Password", command=self.on_verify_blink_password).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=6)
+        ttk.Button(actions, text="Lock File", command=self.on_lock_file).grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=6)
+        ttk.Button(actions, text="Unlock File", command=self.on_unlock_file).grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=6)
+
+        storage = ttk.LabelFrame(side, text="Local Privacy Store", style="Panel.TLabelframe", padding=12)
+        storage.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(storage, text=f"Data folder: {Path(self.client.args.data_dir).resolve()}", style="Info.TLabel", wraplength=380).grid(
+            row=0, column=0, sticky="w", pady=(0, 6)
+        )
+        ttk.Label(storage, textvariable=self.profiles_var, style="Info.TLabel", wraplength=380, justify=tk.LEFT).grid(
+            row=1, column=0, sticky="w"
+        )
+
+        status = ttk.LabelFrame(side, text="Status", style="Panel.TLabelframe", padding=12)
+        status.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        side.rowconfigure(3, weight=1)
+        ttk.Label(status, textvariable=self.status_var, style="Info.TLabel", wraplength=380, justify=tk.LEFT).grid(
+            row=0, column=0, sticky="nw"
+        )
+
+    def _profiles_text(self) -> str:
+        names = sorted(self.client.store.profiles.keys())
+        if not names:
+            return "Registered identities: none"
+        return "Registered identities: " + ", ".join(names)
+
+    def _show_dialog(self, kind: str, message: str):
+        now = time.time()
+        if now < self.dialog_cooldown_until:
+            return
+        self.dialog_cooldown_until = now + 0.75
+        if kind == "error":
+            messagebox.showerror("Federated Client", message, parent=self.root)
+        else:
+            messagebox.showinfo("Federated Client", message, parent=self.root)
+
+    def update_summary(self):
+        self.status_var.set(self.client.last_message)
+        self.server_var.set(f"Hub: {self.client.server_state}")
+        self.model_var.set(
+            f"Model v{self.client.server_model_version} | face thr {self.client.recognition_threshold:.3f} | blink thr {self.client.ear_blink_threshold:.3f}"
+        )
+        self.recognition_var.set(f"Recognition: {'ON' if self.client.recognition_mode else 'OFF'}")
+        self.identity_var.set(f"Recognized: {self.client.latest_name} ({self.client.latest_dist:.3f})")
+        self.eye_var.set(f"EAR: {self.client.current_ear:.3f}")
+        self.rapid_var.set(f"Rapid eye closure: {'YES' if self.client.rapid_eye_closure else 'NO'}")
+        if self.client.pattern_capture_mode:
+            remaining = max(0.0, self.client.pattern_window_seconds - (time.time() - self.client.pattern_capture_start))
+            self.capture_var.set(f"Blink capture: {self.client.pattern_capture_mode} ({remaining:.1f}s)")
+        else:
+            self.capture_var.set("Blink capture: idle")
+        self.profiles_var.set(self._profiles_text())
+        self.recognition_button.configure(text="Disable Recognition" if self.client.recognition_mode else "Enable Recognition")
+
+    def on_register(self):
+        name = simpledialog.askstring("Register Face", "Enter a local identity name:", parent=self.root)
+        if name is None:
+            return
+        if not self.client.start_registration(name):
+            self._show_dialog("error", "Identity name cannot be empty.")
+        self.update_summary()
+
+    def on_toggle_recognition(self):
+        self.client.toggle_recognition()
+        self.update_summary()
+
+    def on_set_blink_password(self):
+        self.client.start_pattern_capture("set")
+        self.update_summary()
+
+    def on_verify_blink_password(self):
+        if not self.client.store.has_blink_password():
+            self._show_dialog("error", "Set a blink password first.")
+            return
+        self.client.pending_file_action = None
+        self.client.start_pattern_capture("verify")
+        self.update_summary()
+
+    def on_lock_file(self):
+        if not self.client.store.has_blink_password():
+            self._show_dialog("error", "Set a blink password first.")
+            return
+        selected = filedialog.askopenfilename(title="Select a file to lock", parent=self.root)
+        if not selected:
+            return
+        self.client.queue_lock(Path(selected))
+        self.update_summary()
+
+    def on_unlock_file(self):
+        if not self.client.store.has_blink_password():
+            self._show_dialog("error", "Set a blink password first.")
+            return
+        selected = filedialog.askopenfilename(
+            title="Select a locked file",
+            filetypes=[("Locked files", "*.lock"), ("All files", "*.*")],
+            parent=self.root,
+        )
+        if not selected:
+            return
+        self.client.queue_unlock(Path(selected))
+        self.update_summary()
+
+    def on_close(self):
+        self.closed = True
+        if self.face_mesh is not None:
+            self.face_mesh.close()
+        if self.cap is not None:
+            self.cap.release()
+        self.root.destroy()
+
+    def start(self):
+        self.client.register_to_server()
+        self.update_summary()
+
+        self.cap = cv2.VideoCapture(self.client.args.camera, cv2.CAP_DSHOW)
+        if not self.cap.isOpened():
+            self._show_dialog("error", "Unable to open the selected camera.")
+            self.on_close()
+            return
+
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.client.args.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.client.args.height)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=1,
             refine_landmarks=True,
@@ -268,152 +492,110 @@ class FederatedClient:
             min_tracking_confidence=0.5,
         )
 
-        win_name = f"FederatedClient-{self.client_id}"
-        print(
-            "Controls: [r] register  [s] recognize  [b] set blink pass  [v] verify blink  "
-            "[l] lock file  [u] unlock file  [q] quit"
-        )
+        self.root.after(0, self.update_frame)
+        self.root.mainloop()
 
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
+    def update_frame(self):
+        if self.closed or self.cap is None or self.face_mesh is None:
+            return
 
-            frame = cv2.flip(frame, 1)
-            frame = enhance_frame(frame)
+        ok, frame = self.cap.read()
+        if not ok:
+            self.client.set_status("Camera stream ended.")
+            self.update_summary()
+            self.root.after(60, self.update_frame)
+            return
 
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            self.frame_brightness.append(float(np.mean(gray)))
+        frame = cv2.flip(frame, 1)
+        frame = enhance_frame(frame)
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = face_mesh.process(rgb)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.client.frame_brightness.append(float(np.mean(gray)))
 
-            now_ts = time.time()
-            face_found = False
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.face_mesh.process(rgb)
 
-            if results.multi_face_landmarks:
-                face_found = True
-                lms = results.multi_face_landmarks[0].landmark
-                h, w = frame.shape[:2]
+        now_ts = time.time()
+        face_found = False
 
-                emb = build_face_embedding(lms, w, h)
+        if results.multi_face_landmarks:
+            face_found = True
+            lms = results.multi_face_landmarks[0].landmark
+            h, w = frame.shape[:2]
 
-                left_ear = compute_ear(lms, w, h, LEFT_EYE_IDX)
-                right_ear = compute_ear(lms, w, h, RIGHT_EYE_IDX)
-                ear = (left_ear + right_ear) / 2.0
+            emb = build_face_embedding(lms, w, h)
 
-                if ear < self.ear_blink_threshold and not self.eye_closed:
-                    self.eye_closed = True
-                elif ear >= self.ear_blink_threshold and self.eye_closed:
-                    self.eye_closed = False
-                    if now_ts - self.last_blink_ts > 0.12:
-                        self.last_blink_ts = now_ts
-                        self.handle_blink_event(now_ts)
+            left_ear = compute_ear(lms, w, h, LEFT_EYE_IDX)
+            right_ear = compute_ear(lms, w, h, RIGHT_EYE_IDX)
+            ear = (left_ear + right_ear) / 2.0
+            self.client.current_ear = ear
 
-                if self.registering_name:
-                    self.registration_samples.append(emb)
-                    if len(self.registration_samples) >= self.registration_target:
-                        self.store.add_profile(self.registering_name, self.registration_samples)
-                        self.last_message = f"Registered local identity: {self.registering_name}"
-                        print(f"[Client:{self.client_id}] Saved local profile '{self.registering_name}'")
-                        self.registering_name = None
-                        self.registration_samples = []
+            if ear < self.client.ear_blink_threshold and not self.client.eye_closed:
+                self.client.eye_closed = True
+            elif ear >= self.client.ear_blink_threshold and self.client.eye_closed:
+                self.client.eye_closed = False
+                if now_ts - self.client.last_blink_ts > 0.12:
+                    self.client.last_blink_ts = now_ts
+                    self.client.handle_blink_event(now_ts)
 
-                if self.recognition_mode:
-                    self.latest_name, self.latest_dist = self.store.recognize(emb, self.recognition_threshold)
+            if self.client.registering_name:
+                self.client.registration_samples.append(emb)
+                if len(self.client.registration_samples) >= self.client.registration_target:
+                    self.client.store.add_profile(self.client.registering_name, self.client.registration_samples)
+                    self.client.set_status(f"Registered local identity: {self.client.registering_name}")
+                    self.client.registering_name = None
+                    self.client.registration_samples = []
 
-                cv2.putText(frame, f"EAR: {ear:.3f}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 230, 60), 2)
+            if self.client.recognition_mode:
+                self.client.latest_name, self.client.latest_dist = self.client.store.recognize(
+                    emb, self.client.recognition_threshold
+                )
+            else:
+                self.client.latest_name = "RecognitionOff"
+                self.client.latest_dist = 999.0
 
-            if not face_found and self.registering_name:
+            cv2.putText(frame, f"EAR: {ear:.3f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 230, 60), 2)
+            cv2.putText(frame, f"Client: {self.client.client_id}", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(
+                frame,
+                f"Recognized: {self.client.latest_name}",
+                (12, 88),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (90, 255, 140) if self.client.latest_name not in ("Unknown", "NoLocalData", "RecognitionOff") else (0, 215, 255),
+                2,
+            )
+        else:
+            self.client.current_ear = 0.0
+            if self.client.registering_name:
                 cv2.putText(
                     frame,
                     "No face detected for registration",
-                    (10, 130),
+                    (12, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
+                    0.7,
                     (0, 0, 255),
                     2,
                 )
 
-            self.finalize_pattern_capture_if_needed()
-            self.push_federated_update()
+        dialog = self.client.finalize_pattern_capture_if_needed()
+        self.client.push_federated_update()
+        self.update_summary()
 
-            rec_text = f"Recognized: {self.latest_name} ({self.latest_dist:.3f})" if self.recognition_mode else "Recognition: OFF"
-            rec_color = (20, 220, 20) if self.latest_name not in ("Unknown", "NoLocalData") else (30, 170, 255)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(rgb_frame)
+        image = image.resize((820, 620))
+        self.video_image = ImageTk.PhotoImage(image=image)
+        self.video_label.configure(image=self.video_image)
 
-            cv2.putText(frame, f"Client: {self.client_id}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-            cv2.putText(frame, f"ServerModel: v{self.server_model_version}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 220, 180), 2)
-            cv2.putText(frame, rec_text, (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, rec_color, 2)
-            cv2.putText(
-                frame,
-                f"RapidEyeClosure: {'YES' if self.rapid_eye_closure else 'NO'}",
-                (10, 125),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 255) if self.rapid_eye_closure else (120, 255, 120),
-                2,
-            )
+        if dialog:
+            self._show_dialog(dialog[0], dialog[1])
 
-            if self.pattern_capture_mode:
-                remaining = max(0.0, self.pattern_window_seconds - (time.time() - self.pattern_capture_start))
-                cv2.putText(
-                    frame,
-                    f"Blink capture ({self.pattern_capture_mode}) {remaining:.1f}s",
-                    (10, 150),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (60, 220, 255),
-                    2,
-                )
-
-            cv2.putText(frame, self.last_message[:90], (10, frame.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (240, 240, 240), 2)
-
-            cv2.imshow(win_name, frame)
-            key = cv2.waitKey(1) & 0xFF
-
-            if key == ord("q"):
-                break
-            if key == ord("r"):
-                self.start_registration()
-            if key == ord("s"):
-                self.recognition_mode = not self.recognition_mode
-                self.last_message = f"Recognition {'ON' if self.recognition_mode else 'OFF'}"
-            if key == ord("b"):
-                self.start_pattern_capture("set")
-            if key == ord("v"):
-                if not self.store.has_blink_password():
-                    self.last_message = "Set blink password first (press b)"
-                else:
-                    self.pending_file_action = None
-                    self.start_pattern_capture("verify")
-            if key == ord("l"):
-                if not self.store.has_blink_password():
-                    self.last_message = "Set blink password first (press b)"
-                else:
-                    path = Path(input("File path to lock: ").strip()).expanduser()
-                    if not path.exists() or not path.is_file():
-                        self.last_message = "Invalid file path"
-                    else:
-                        self.pending_file_action = ("lock", path)
-                        self.start_pattern_capture("verify")
-            if key == ord("u"):
-                if not self.store.has_blink_password():
-                    self.last_message = "Set blink password first (press b)"
-                else:
-                    path = Path(input(".lock file path to unlock: ").strip()).expanduser()
-                    if not path.exists() or not path.is_file():
-                        self.last_message = "Invalid lock file path"
-                    else:
-                        self.pending_file_action = ("unlock", path)
-                        self.start_pattern_capture("verify")
-
-        face_mesh.close()
-        cap.release()
-        cv2.destroyAllWindows()
+        self.root.after(20, self.update_frame)
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Federated client for local physiognomy + blink detection")
+    p = argparse.ArgumentParser(description="Federated client GUI for local physiognomy and blink detection")
     p.add_argument("--client-id", required=True)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=9000)
@@ -426,8 +608,9 @@ def parse_args():
 
 def main():
     args = parse_args()
-    app = FederatedClient(args)
-    app.run()
+    client = FederatedClient(args)
+    gui = FederatedClientGUI(client)
+    gui.start()
 
 
 if __name__ == "__main__":
