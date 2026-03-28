@@ -43,19 +43,18 @@ $env:PY312="C:\\Path\\To\\Python312\\python.exe"
 .\run_client2.ps1
 ```
 
+Each client now opens a GUI window with:
+- live camera feed
+- face registration button
+- recognition toggle
+- blink password setup and verification
+- file lock and unlock dialogs
+- live status for server sync, EAR, recognition result, and rapid eye closure
+
 Or launch all 3 windows automatically:
 ```powershell
 .\run_demo.ps1
 ```
-
-## Client controls
-- `r`: Register current face as a local identity
-- `s`: Start/stop face recognition mode
-- `b`: Set blink password
-- `v`: Verify blink password
-- `l`: Lock a file (encrypt)
-- `u`: Unlock a file (decrypt)
-- `q`: Quit
 
 ## Privacy and isolation
 - Client local data is stored under each data directory (`data/client1`, `data/client2`).
