@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import json
 import os
 import socket
@@ -140,7 +141,7 @@ def salted_hash(text: str, salt: bytes | None = None) -> Tuple[str, str]:
 def verify_salted_hash(text: str, salt_b64: str, hash_b64: str) -> bool:
     salt = base64.b64decode(salt_b64)
     _, candidate = salted_hash(text, salt=salt)
-    return hashlib.compare_digest(candidate, hash_b64)
+    return hmac.compare_digest(candidate, hash_b64)
 
 
 def _derive_fernet_key(secret: str, salt: bytes) -> bytes:
