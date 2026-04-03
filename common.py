@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 import cv2
 import numpy as np
 from cryptography.fernet import Fernet
+import tensorflow as tf
+from tensorflow.keras import layers, models
 
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
@@ -17,6 +19,48 @@ EMBEDDING_IDX = [
     1, 4, 10, 33, 61, 93, 127, 132, 152, 172, 199, 234,
     263, 291, 323, 356, 389, 454,
 ]
+
+
+def create_face_cnn_model(input_shape=(128, 128, 3), embedding_dim=128):
+    model = models.Sequential([
+        layers.Conv2D(32, (3, 3), activation='relu', input_shape=input_shape),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(128, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Flatten(),
+        layers.Dense(256, activation='relu'),
+        layers.Dense(embedding_dim, activation='linear'),  # Embedding layer
+    ])
+    return model
+
+
+def build_face_embedding_cnn(face_image: np.ndarray, model: tf.keras.Model) -> np.ndarray:
+    # Preprocess image: resize to 128x128, normalize
+    face_resized = cv2.resize(face_image, (128, 128))
+    face_normalized = face_resized / 255.0
+    face_input = np.expand_dims(face_normalized, axis=0)
+    embedding = model.predict(face_input, verbose=0)[0]
+    # Normalize embedding
+    embedding /= np.linalg.norm(embedding) + 1e-9
+    return embedding
+
+
+def crop_face_from_landmarks(frame: np.ndarray, landmarks) -> np.ndarray:
+    h, w = frame.shape[:2]
+    x_coords = [lm.x * w for lm in landmarks]
+    y_coords = [lm.y * h for lm in landmarks]
+    x_min, x_max = int(min(x_coords)), int(max(x_coords))
+    y_min, y_max = int(min(y_coords)), int(max(y_coords))
+    # Add padding
+    padding = int(0.1 * (x_max - x_min))
+    x_min = max(0, x_min - padding)
+    x_max = min(w, x_max + padding)
+    y_min = max(0, y_min - padding)
+    y_max = min(h, y_max + padding)
+    face_crop = frame[y_min:y_max, x_min:x_max]
+    return face_crop
 
 
 def ensure_dir(path: str | Path) -> Path:

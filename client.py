@@ -9,15 +9,18 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import mediapipe as mp
 import numpy as np
+import tensorflow as tf
 from PIL import Image, ImageTk
 
 from common import (
     LEFT_EYE_IDX,
     RIGHT_EYE_IDX,
     blink_pattern_from_timestamps,
-    build_face_embedding,
+    build_face_embedding_cnn,
     compute_ear,
     cosine_distance,
+    crop_face_from_landmarks,
+    create_face_cnn_model,
     enhance_frame,
     ensure_dir,
     load_json,
@@ -58,6 +61,9 @@ class LocalStore:
         best_dist = 999.0
         for name, ref in self.profiles.items():
             ref_vec = np.array(ref, dtype=np.float32)
+            # Skip invalid profiles (e.g., all zeros from old method)
+            if np.allclose(ref_vec, 0.0):
+                continue
             d = cosine_distance(emb, ref_vec)
             if d < best_dist:
                 best_dist = d
@@ -93,6 +99,7 @@ class FederatedClient:
         self.recognition_threshold = 0.33
         self.ear_blink_threshold = 0.21
         self.server_model_version = 1
+        self.face_model = None
         self.last_federated_push = 0.0
 
         self.recognition_mode = False
@@ -135,7 +142,14 @@ class FederatedClient:
                 self.recognition_threshold = float(gm.get("recognition_threshold", self.recognition_threshold))
                 self.ear_blink_threshold = float(gm.get("ear_blink_threshold", self.ear_blink_threshold))
                 self.server_model_version = int(gm.get("version", self.server_model_version))
-                self.server_state = "Connected"
+                model_weights = gm.get("model_weights", [])
+                if model_weights:
+                    self.face_model = create_face_cnn_model()
+                    self.face_model.set_weights([np.array(w) for w in model_weights])                
+                else:
+                    # Initialize with random weights if no global model
+                    self.face_model = create_face_cnn_model()                
+                    self.server_state = "Connected"
                 self.set_status(f"Connected to hub. Model v{self.server_model_version}")
             else:
                 self.server_state = "Unavailable"
@@ -156,12 +170,13 @@ class FederatedClient:
             local_rec = self.recognition_threshold
 
         local_ear = max(0.16, min(0.28, self.ear_blink_threshold))
+        model_weights = [w.tolist() for w in self.face_model.get_weights()] if self.face_model else []
         payload = {
             "action": "submit_update",
             "client_id": self.client_id,
             "update": {
                 "recognition_threshold": local_rec,
-                "ear_blink_threshold": local_ear,
+                "model_weights": model_weights,
             },
         }
 
@@ -171,6 +186,11 @@ class FederatedClient:
                 gm = resp["global_model"]
                 self.recognition_threshold = float(gm["recognition_threshold"])
                 self.ear_blink_threshold = float(gm["ear_blink_threshold"])
+                model_weights = gm.get("model_weights", [])
+                if model_weights:
+                    if not self.face_model:
+                        self.face_model = create_face_cnn_model()
+                    self.face_model.set_weights([np.array(layer) for layer in model_weights])
                 self.server_model_version = int(gm["version"])
                 self.server_state = "Connected"
         except Exception:
@@ -523,7 +543,8 @@ class FederatedClientGUI:
             lms = results.multi_face_landmarks[0].landmark
             h, w = frame.shape[:2]
 
-            emb = build_face_embedding(lms, w, h)
+            face_crop = crop_face_from_landmarks(frame, lms)
+            emb = build_face_embedding_cnn(face_crop, self.client.face_model) if self.client.face_model else np.zeros(128)
 
             left_ear = compute_ear(lms, w, h, LEFT_EYE_IDX)
             right_ear = compute_ear(lms, w, h, RIGHT_EYE_IDX)

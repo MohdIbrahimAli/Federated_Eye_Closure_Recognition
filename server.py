@@ -2,18 +2,27 @@ import json
 import socketserver
 import threading
 import time
+import sys
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, List
+
+import numpy as np
 
 HOST = "127.0.0.1"
-PORT = 9000
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9000
 
-
+def average_weights(current, new, n):
+    """Recursively average two nested weight structures."""
+    if isinstance(current, list) and isinstance(new, list):
+        return [average_weights(c, nw, n) for c, nw in zip(current, new)]
+    else:
+        return (current * n + new) / (n + 1)
 @dataclass
 class GlobalModel:
     version: int = 1
     recognition_threshold: float = 0.33
     ear_blink_threshold: float = 0.21
+    model_weights: List[List[float]] = field(default_factory=list)
     updates_seen: int = 0
 
 
@@ -70,6 +79,7 @@ class HubHandler(socketserver.StreamRequestHandler):
                     "version": model.version,
                     "recognition_threshold": model.recognition_threshold,
                     "ear_blink_threshold": model.ear_blink_threshold,
+                    "model_weights": model.model_weights,
                 },
             }
         )
@@ -86,6 +96,7 @@ class HubHandler(socketserver.StreamRequestHandler):
                     "version": model.version,
                     "recognition_threshold": model.recognition_threshold,
                     "ear_blink_threshold": model.ear_blink_threshold,
+                    "model_weights": model.model_weights,
                     "updates_seen": model.updates_seen,
                 },
                 "active_clients": active_clients,
@@ -104,12 +115,16 @@ class HubHandler(socketserver.StreamRequestHandler):
             model = STATE.model
 
             rec_thr = float(update.get("recognition_threshold", model.recognition_threshold))
-            ear_thr = float(update.get("ear_blink_threshold", model.ear_blink_threshold))
+            new_weights = update.get("model_weights", [])
 
-            # Federated aggregation of scalar parameters only.
+            # Federated aggregation of scalar parameters and model weights.
             n = model.updates_seen
             model.recognition_threshold = (model.recognition_threshold * n + rec_thr) / (n + 1)
-            model.ear_blink_threshold = (model.ear_blink_threshold * n + ear_thr) / (n + 1)
+            if new_weights and not model.model_weights:
+                model.model_weights = new_weights
+            elif new_weights:
+                # Average the weights recursively
+                model.model_weights = [average_weights(layer_a, layer_b, n) for layer_a, layer_b in zip(model.model_weights, new_weights)]
             model.updates_seen += 1
             model.version += 1
 
@@ -117,6 +132,7 @@ class HubHandler(socketserver.StreamRequestHandler):
                 "version": model.version,
                 "recognition_threshold": model.recognition_threshold,
                 "ear_blink_threshold": model.ear_blink_threshold,
+                "model_weights": model.model_weights,
                 "updates_seen": model.updates_seen,
             }
 
