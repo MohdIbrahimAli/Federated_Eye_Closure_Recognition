@@ -7,6 +7,7 @@ from tkinter import filedialog, messagebox, simpledialog
 from typing import Dict, List, Optional, Tuple
 
 import cv2
+import face_recognition
 import mediapipe as mp
 import numpy as np
 from PIL import Image, ImageTk
@@ -15,7 +16,6 @@ from common import (
     LEFT_EYE_IDX,
     RIGHT_EYE_IDX,
     blink_pattern_from_timestamps,
-    build_face_embedding,
     compute_ear,
     cosine_distance,
     enhance_frame,
@@ -903,8 +903,6 @@ class FederatedClientGUI:
             lms = results.multi_face_landmarks[0].landmark
             h, w = frame.shape[:2]
 
-            emb = build_face_embedding(lms, w, h)
-
             left_ear = compute_ear(lms, w, h, LEFT_EYE_IDX)
             right_ear = compute_ear(lms, w, h, RIGHT_EYE_IDX)
             ear = (left_ear + right_ear) / 2.0
@@ -918,25 +916,42 @@ class FederatedClientGUI:
                     self.client.last_blink_ts = now_ts
                     self.client.handle_blink_event(now_ts)
 
-            if self.client.registering_name:
-                self.client.registration_samples.append(emb)
-                if len(self.client.registration_samples) >= self.client.registration_target:
-                    self.client.store.add_profile(
-                        self.client.registering_name, self.client.registration_samples
-                    )
-                    self.client.set_status(f"Registered local identity: {self.client.registering_name}")
-                    self.client.registering_name = None
-                    self.client.registration_samples = []
+            # Calculate bounding box for face_recognition
+            x_coords = [int(lm.x * w) for lm in lms]
+            y_coords = [int(lm.y * h) for lm in lms]
+            left, right = max(0, min(x_coords)), min(w, max(x_coords))
+            top, bottom = max(0, min(y_coords)), min(h, max(y_coords))
+            face_location = (top, right, bottom, left)
 
-            if self.client.recognition_mode:
-                attempted_recognition = True
-                self.client.latest_name, self.client.latest_dist = self.client.store.recognize(
-                    emb, self.client.recognition_threshold
-                )
-                recognized = self.client.latest_name not in ("Unknown", "NoLocalData", "RecognitionOff")
+            # Extract 128D face encoding using face_recognition
+            encodings = face_recognition.face_encodings(rgb, known_face_locations=[face_location])
+            if encodings:
+                emb = encodings[0]
+                emb = emb / (np.linalg.norm(emb) + 1e-9)
+
+                if self.client.registering_name:
+                    self.client.registration_samples.append(emb)
+                    if len(self.client.registration_samples) >= self.client.registration_target:
+                        self.client.store.add_profile(
+                            self.client.registering_name, self.client.registration_samples
+                        )
+                        self.client.set_status(f"Registered local identity: {self.client.registering_name}")
+                        self.client.registering_name = None
+                        self.client.registration_samples = []
+
+                if self.client.recognition_mode:
+                    attempted_recognition = True
+                    self.client.latest_name, self.client.latest_dist = self.client.store.recognize(
+                        emb, self.client.recognition_threshold
+                    )
+                    recognized = self.client.latest_name not in ("Unknown", "NoLocalData", "RecognitionOff")
+                else:
+                    self.client.latest_name = "RecognitionOff"
+                    self.client.latest_dist = 999.0
             else:
-                self.client.latest_name = "RecognitionOff"
-                self.client.latest_dist = 999.0
+                if not self.client.recognition_mode:
+                    self.client.latest_name = "RecognitionOff"
+                    self.client.latest_dist = 999.0
 
             cv2.putText(frame, f"EAR: {ear:.3f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 230, 60), 2)
             cv2.putText(
