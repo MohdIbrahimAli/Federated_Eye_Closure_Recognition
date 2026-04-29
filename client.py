@@ -73,6 +73,12 @@ class LocalStore:
 
         if best_dist > threshold:
             return "Unknown", best_dist
+        
+        # Extra confidence check: require distance to be well below threshold
+        # with a 0.05 safety margin to prevent false positives on unregistered faces
+        if best_dist > (threshold - 0.05):
+            return "Unknown", best_dist
+        
         return best_name, best_dist
 
     def set_blink_password(self, pattern: str):
@@ -99,7 +105,7 @@ class FederatedClient:
         self.store = LocalStore(Path(args.data_dir))
 
         # Global model parameters (received from server)
-        self.recognition_threshold = 0.33
+        self.recognition_threshold = 0.28
         self.ear_blink_threshold = 0.21
         self.server_model_version = 1
         self.face_model = None
