@@ -29,6 +29,8 @@ from common import (
     verify_salted_hash,
 )
 
+FL_PUSH_INTERVAL = 15.0  # seconds between federated updates
+
 
 class LocalStore:
     def __init__(self, data_dir: Path):
@@ -90,6 +92,7 @@ class FederatedClient:
         self.client_id = args.client_id
         self.store = LocalStore(Path(args.data_dir))
 
+        # Global model parameters (received from server)
         self.recognition_threshold = 0.33
         self.ear_blink_threshold = 0.21
         self.server_model_version = 1
@@ -120,6 +123,41 @@ class FederatedClient:
 
         self.frame_brightness: deque = deque(maxlen=90)
 
+        # ── Federated Learning local statistics ──────────────────────────────
+        # Collected each interval, then sent to the server as a summary.
+        # The server aggregates summaries from all clients via weighted FedAvg
+        # and returns updated global model parameters.
+        self._fl_reset_interval()
+        self._fl_interval_start = time.time()
+
+        # Last FL summary sent and response received (for GUI display)
+        self.fl_last_summary: dict = {}
+        self.fl_last_response: dict = {}
+
+    def _fl_reset_interval(self):
+        """Zero out local observation counters at the start of each FL round."""
+        self._fl_frames_processed = 0
+        self._fl_frames_with_face = 0
+        self._fl_ear_open_sum = 0.0
+        self._fl_ear_open_count = 0
+        self._fl_blink_count = 0
+        self._fl_recognition_attempts = 0
+        self._fl_recognition_success = 0
+
+    def record_frame(self, face_found: bool, ear: float, recognized: bool, attempted_recognition: bool):
+        """Called once per frame from the GUI loop to accumulate local stats."""
+        self._fl_frames_processed += 1
+        if face_found:
+            self._fl_frames_with_face += 1
+            if ear >= self.ear_blink_threshold:
+                # Eyes are open — record the open-eye EAR baseline
+                self._fl_ear_open_sum += ear
+                self._fl_ear_open_count += 1
+        if attempted_recognition:
+            self._fl_recognition_attempts += 1
+            if recognized:
+                self._fl_recognition_success += 1
+
     def set_status(self, message: str):
         self.last_message = message
 
@@ -131,10 +169,7 @@ class FederatedClient:
                 {"action": "register_client", "client_id": self.client_id},
             )
             if resp.get("status") == "ok":
-                gm = resp.get("global_model", {})
-                self.recognition_threshold = float(gm.get("recognition_threshold", self.recognition_threshold))
-                self.ear_blink_threshold = float(gm.get("ear_blink_threshold", self.ear_blink_threshold))
-                self.server_model_version = int(gm.get("version", self.server_model_version))
+                self._apply_global_model(resp.get("global_model", {}))
                 self.server_state = "Connected"
                 self.set_status(f"Connected to hub. Model v{self.server_model_version}")
             else:
@@ -144,38 +179,83 @@ class FederatedClient:
             self.server_state = "Unavailable"
             self.set_status("Hub unavailable. Running in local-only mode.")
 
+    def _apply_global_model(self, gm: dict):
+        """Apply global model parameters received from the server."""
+        self.recognition_threshold = float(gm.get("recognition_threshold", self.recognition_threshold))
+        self.ear_blink_threshold = float(gm.get("ear_blink_threshold", self.ear_blink_threshold))
+        self.server_model_version = int(gm.get("version", self.server_model_version))
+        self.fl_last_response = gm
+
     def push_federated_update(self):
+        """
+        Build a local statistical summary and send it to the federated server.
+
+        Summary fields:
+          mean_ear_open        – average EAR when eyes were open this interval
+          blink_rate           – blinks per minute observed locally
+          mean_brightness      – mean frame brightness (0–255)
+          face_detection_rate  – fraction of frames where a face was detected
+          recognition_accuracy – fraction of recognition attempts that succeeded
+          frames_processed     – total frames this interval (used as FedAvg weight)
+
+        The server runs weighted FedAvg across all connected clients and derives:
+          ear_blink_threshold  ← global_mean_ear_open × 0.72
+          recognition_threshold ← calibrated from brightness + accuracy
+        """
         now = time.time()
-        if now - self.last_federated_push < 15.0:
+        if now - self.last_federated_push < FL_PUSH_INTERVAL:
             return
 
-        if self.frame_brightness:
-            mean_b = float(np.mean(self.frame_brightness))
-            local_rec = max(0.22, min(0.45, 0.33 + ((130.0 - mean_b) / 1000.0)))
-        else:
-            local_rec = self.recognition_threshold
+        interval_secs = now - self._fl_interval_start
 
-        local_ear = max(0.16, min(0.28, self.ear_blink_threshold))
+        mean_ear_open = (
+            self._fl_ear_open_sum / self._fl_ear_open_count
+            if self._fl_ear_open_count > 0
+            else 0.30
+        )
+        blink_rate = (self._fl_blink_count / interval_secs * 60.0) if interval_secs > 0 else 0.0
+        mean_brightness = float(np.mean(self.frame_brightness)) if self.frame_brightness else 130.0
+        face_detection_rate = (
+            self._fl_frames_with_face / self._fl_frames_processed
+            if self._fl_frames_processed > 0
+            else 0.0
+        )
+        recognition_accuracy = (
+            self._fl_recognition_success / self._fl_recognition_attempts
+            if self._fl_recognition_attempts > 0
+            else 0.0
+        )
+
+        summary = {
+            "mean_ear_open": round(mean_ear_open, 5),
+            "blink_rate": round(blink_rate, 3),
+            "mean_brightness": round(mean_brightness, 2),
+            "face_detection_rate": round(face_detection_rate, 4),
+            "recognition_accuracy": round(recognition_accuracy, 4),
+            "frames_processed": self._fl_frames_processed,
+        }
+        self.fl_last_summary = summary
+
         payload = {
             "action": "submit_update",
             "client_id": self.client_id,
-            "update": {
-                "recognition_threshold": local_rec,
-                "ear_blink_threshold": local_ear,
-            },
+            "update": summary,
         }
 
         try:
             resp = send_message(self.args.host, self.args.port, payload)
             if resp.get("status") == "ok":
-                gm = resp["global_model"]
-                self.recognition_threshold = float(gm["recognition_threshold"])
-                self.ear_blink_threshold = float(gm["ear_blink_threshold"])
-                self.server_model_version = int(gm["version"])
+                self._apply_global_model(resp["global_model"])
                 self.server_state = "Connected"
+                self.set_status(
+                    f"FL round {self.server_model_version} complete. "
+                    f"ear_thr={self.ear_blink_threshold:.3f}  rec_thr={self.recognition_threshold:.3f}"
+                )
         except Exception:
             self.server_state = "Unavailable"
 
+        self._fl_reset_interval()
+        self._fl_interval_start = now
         self.last_federated_push = now
 
     def start_registration(self, name: str) -> bool:
@@ -203,6 +283,7 @@ class FederatedClient:
     def handle_blink_event(self, now_ts: float):
         self.blink_timestamps.append(now_ts)
         self.rapid_window.append(now_ts)
+        self._fl_blink_count += 1  # contribute to FL blink_rate stat
 
         while self.rapid_window and (now_ts - self.rapid_window[0] > 2.0):
             self.rapid_window.popleft()
@@ -281,7 +362,7 @@ class FederatedClientGUI:
 
         self.root = tk.Tk()
         self.root.title(f"Federated Client - {self.client.client_id}")
-        self.root.geometry("1280x820")
+        self.root.geometry("1280x900")
         self.root.configure(bg="#f4f6fb")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -294,6 +375,11 @@ class FederatedClientGUI:
         self.rapid_var = tk.StringVar(value="Rapid eye closure: NO")
         self.capture_var = tk.StringVar(value="Blink capture: idle")
         self.profiles_var = tk.StringVar(value=self._profiles_text())
+
+        # Federated Learning activity display
+        self.fl_sent_var = tk.StringVar(value="Sent summary: (waiting for first push)")
+        self.fl_recv_var = tk.StringVar(value="Global model: (not yet received)")
+        self.fl_countdown_var = tk.StringVar(value="Next FL push in: --s")
 
         self._build_layout()
 
@@ -308,6 +394,7 @@ class FederatedClientGUI:
         style.configure("Panel.TLabelframe", background="#ffffff")
         style.configure("Panel.TLabelframe.Label", background="#ffffff", foreground="#1c274c")
         style.configure("Info.TLabel", background="#ffffff", foreground="#1f2d3d", font=("Segoe UI", 10))
+        style.configure("FL.TLabel", background="#ffffff", foreground="#0d47a1", font=("Segoe UI", 9))
         style.configure("Title.TLabel", background="#f4f6fb", foreground="#14213d", font=("Segoe UI", 16, "bold"))
 
         container = ttk.Frame(self.root, padding=16)
@@ -335,50 +422,99 @@ class FederatedClientGUI:
         side.grid(row=1, column=1, sticky="nsew")
         side.columnconfigure(0, weight=1)
 
+        # ── Live Summary ─────────────────────────────────────────────────────
         summary = ttk.LabelFrame(side, text="Live Summary", style="Panel.TLabelframe", padding=12)
         summary.grid(row=0, column=0, sticky="ew")
 
-        for idx, variable in enumerate(
-            [
-                self.server_var,
-                self.model_var,
-                self.recognition_var,
-                self.identity_var,
-                self.eye_var,
-                self.rapid_var,
-                self.capture_var,
-            ]
-        ):
-            ttk.Label(summary, textvariable=variable, style="Info.TLabel").grid(row=idx, column=0, sticky="w", pady=2)
+        for idx, variable in enumerate([
+            self.server_var,
+            self.model_var,
+            self.recognition_var,
+            self.identity_var,
+            self.eye_var,
+            self.rapid_var,
+            self.capture_var,
+        ]):
+            ttk.Label(summary, textvariable=variable, style="Info.TLabel").grid(
+                row=idx, column=0, sticky="w", pady=2
+            )
 
+        # ── Client Actions ────────────────────────────────────────────────────
         actions = ttk.LabelFrame(side, text="Client Actions", style="Panel.TLabelframe", padding=12)
         actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         actions.columnconfigure(0, weight=1)
         actions.columnconfigure(1, weight=1)
 
-        ttk.Button(actions, text="Register Face", command=self.on_register).grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=6)
-        self.recognition_button = ttk.Button(actions, text="Enable Recognition", command=self.on_toggle_recognition)
+        ttk.Button(actions, text="Register Face", command=self.on_register).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6), pady=6
+        )
+        self.recognition_button = ttk.Button(
+            actions, text="Enable Recognition", command=self.on_toggle_recognition
+        )
         self.recognition_button.grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=6)
-        ttk.Button(actions, text="Set Blink Password", command=self.on_set_blink_password).grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=6)
-        ttk.Button(actions, text="Verify Blink Password", command=self.on_verify_blink_password).grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=6)
-        ttk.Button(actions, text="Lock File", command=self.on_lock_file).grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=6)
-        ttk.Button(actions, text="Unlock File", command=self.on_unlock_file).grid(row=2, column=1, sticky="ew", padx=(6, 0), pady=6)
+        ttk.Button(actions, text="Set Blink Password", command=self.on_set_blink_password).grid(
+            row=1, column=0, sticky="ew", padx=(0, 6), pady=6
+        )
+        ttk.Button(actions, text="Verify Blink Password", command=self.on_verify_blink_password).grid(
+            row=1, column=1, sticky="ew", padx=(6, 0), pady=6
+        )
+        ttk.Button(actions, text="Lock File", command=self.on_lock_file).grid(
+            row=2, column=0, sticky="ew", padx=(0, 6), pady=6
+        )
+        ttk.Button(actions, text="Unlock File", command=self.on_unlock_file).grid(
+            row=2, column=1, sticky="ew", padx=(6, 0), pady=6
+        )
 
+        # ── Federated Learning Activity ───────────────────────────────────────
+        fl_frame = ttk.LabelFrame(
+            side, text="Federated Learning Activity", style="Panel.TLabelframe", padding=12
+        )
+        fl_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        fl_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(fl_frame, textvariable=self.fl_countdown_var, style="FL.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        ttk.Label(
+            fl_frame,
+            text="Last summary sent to server:",
+            style="Info.TLabel",
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=1, column=0, sticky="w")
+        ttk.Label(
+            fl_frame, textvariable=self.fl_sent_var, style="FL.TLabel", wraplength=370, justify=tk.LEFT
+        ).grid(row=2, column=0, sticky="w", pady=(0, 6))
+
+        ttk.Label(
+            fl_frame,
+            text="Global model received from server:",
+            style="Info.TLabel",
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=3, column=0, sticky="w")
+        ttk.Label(
+            fl_frame, textvariable=self.fl_recv_var, style="FL.TLabel", wraplength=370, justify=tk.LEFT
+        ).grid(row=4, column=0, sticky="w")
+
+        # ── Local Privacy Store ───────────────────────────────────────────────
         storage = ttk.LabelFrame(side, text="Local Privacy Store", style="Panel.TLabelframe", padding=12)
-        storage.grid(row=2, column=0, sticky="ew", pady=(12, 0))
-        ttk.Label(storage, text=f"Data folder: {Path(self.client.args.data_dir).resolve()}", style="Info.TLabel", wraplength=380).grid(
-            row=0, column=0, sticky="w", pady=(0, 6)
-        )
-        ttk.Label(storage, textvariable=self.profiles_var, style="Info.TLabel", wraplength=380, justify=tk.LEFT).grid(
-            row=1, column=0, sticky="w"
-        )
+        storage.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ttk.Label(
+            storage,
+            text=f"Data folder: {Path(self.client.args.data_dir).resolve()}",
+            style="Info.TLabel",
+            wraplength=380,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(
+            storage, textvariable=self.profiles_var, style="Info.TLabel", wraplength=380, justify=tk.LEFT
+        ).grid(row=1, column=0, sticky="w")
 
+        # ── Status ────────────────────────────────────────────────────────────
         status = ttk.LabelFrame(side, text="Status", style="Panel.TLabelframe", padding=12)
-        status.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
-        side.rowconfigure(3, weight=1)
-        ttk.Label(status, textvariable=self.status_var, style="Info.TLabel", wraplength=380, justify=tk.LEFT).grid(
-            row=0, column=0, sticky="nw"
-        )
+        status.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        side.rowconfigure(4, weight=1)
+        ttk.Label(
+            status, textvariable=self.status_var, style="Info.TLabel", wraplength=380, justify=tk.LEFT
+        ).grid(row=0, column=0, sticky="nw")
 
     def _profiles_text(self) -> str:
         names = sorted(self.client.store.profiles.keys())
@@ -400,19 +536,58 @@ class FederatedClientGUI:
         self.status_var.set(self.client.last_message)
         self.server_var.set(f"Hub: {self.client.server_state}")
         self.model_var.set(
-            f"Model v{self.client.server_model_version} | face thr {self.client.recognition_threshold:.3f} | blink thr {self.client.ear_blink_threshold:.3f}"
+            f"Model v{self.client.server_model_version} | "
+            f"face_thr {self.client.recognition_threshold:.3f} | "
+            f"blink_thr {self.client.ear_blink_threshold:.3f}"
         )
         self.recognition_var.set(f"Recognition: {'ON' if self.client.recognition_mode else 'OFF'}")
         self.identity_var.set(f"Recognized: {self.client.latest_name} ({self.client.latest_dist:.3f})")
         self.eye_var.set(f"EAR: {self.client.current_ear:.3f}")
         self.rapid_var.set(f"Rapid eye closure: {'YES' if self.client.rapid_eye_closure else 'NO'}")
+
         if self.client.pattern_capture_mode:
-            remaining = max(0.0, self.client.pattern_window_seconds - (time.time() - self.client.pattern_capture_start))
+            remaining = max(
+                0.0,
+                self.client.pattern_window_seconds - (time.time() - self.client.pattern_capture_start),
+            )
             self.capture_var.set(f"Blink capture: {self.client.pattern_capture_mode} ({remaining:.1f}s)")
         else:
             self.capture_var.set("Blink capture: idle")
+
         self.profiles_var.set(self._profiles_text())
-        self.recognition_button.configure(text="Disable Recognition" if self.client.recognition_mode else "Enable Recognition")
+        self.recognition_button.configure(
+            text="Disable Recognition" if self.client.recognition_mode else "Enable Recognition"
+        )
+
+        # FL countdown
+        secs_since_push = time.time() - self.client.last_federated_push
+        next_push = max(0.0, FL_PUSH_INTERVAL - secs_since_push)
+        self.fl_countdown_var.set(f"Next FL push in: {next_push:.0f}s")
+
+        # FL last summary sent
+        s = self.client.fl_last_summary
+        if s:
+            self.fl_sent_var.set(
+                f"ear_open={s.get('mean_ear_open', 0):.4f}  "
+                f"blinks/min={s.get('blink_rate', 0):.1f}  "
+                f"brightness={s.get('mean_brightness', 0):.1f}\n"
+                f"face_rate={s.get('face_detection_rate', 0):.2f}  "
+                f"rec_acc={s.get('recognition_accuracy', 0):.2f}  "
+                f"frames={s.get('frames_processed', 0)}"
+            )
+
+        # FL last global model received
+        g = self.client.fl_last_response
+        if g:
+            self.fl_recv_var.set(
+                f"v{g.get('version', '?')}  "
+                f"ear_thr={g.get('ear_blink_threshold', 0):.4f}  "
+                f"rec_thr={g.get('recognition_threshold', 0):.4f}\n"
+                f"global_ear_open={g.get('global_mean_ear_open', 0):.4f}  "
+                f"blinks/min={g.get('global_blink_rate', 0):.1f}\n"
+                f"brightness={g.get('global_brightness', 0):.1f}  "
+                f"total_frames={g.get('total_frames_seen', 0)}"
+            )
 
     def on_register(self):
         name = simpledialog.askstring("Register Face", "Enter a local identity name:", parent=self.root)
@@ -517,6 +692,9 @@ class FederatedClientGUI:
 
         now_ts = time.time()
         face_found = False
+        ear = 0.0
+        recognized = False
+        attempted_recognition = False
 
         if results.multi_face_landmarks:
             face_found = True
@@ -541,28 +719,36 @@ class FederatedClientGUI:
             if self.client.registering_name:
                 self.client.registration_samples.append(emb)
                 if len(self.client.registration_samples) >= self.client.registration_target:
-                    self.client.store.add_profile(self.client.registering_name, self.client.registration_samples)
+                    self.client.store.add_profile(
+                        self.client.registering_name, self.client.registration_samples
+                    )
                     self.client.set_status(f"Registered local identity: {self.client.registering_name}")
                     self.client.registering_name = None
                     self.client.registration_samples = []
 
             if self.client.recognition_mode:
+                attempted_recognition = True
                 self.client.latest_name, self.client.latest_dist = self.client.store.recognize(
                     emb, self.client.recognition_threshold
                 )
+                recognized = self.client.latest_name not in ("Unknown", "NoLocalData", "RecognitionOff")
             else:
                 self.client.latest_name = "RecognitionOff"
                 self.client.latest_dist = 999.0
 
             cv2.putText(frame, f"EAR: {ear:.3f}", (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 230, 60), 2)
-            cv2.putText(frame, f"Client: {self.client.client_id}", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(
+                frame, f"Client: {self.client.client_id}", (12, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2
+            )
             cv2.putText(
                 frame,
                 f"Recognized: {self.client.latest_name}",
                 (12, 88),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
-                (90, 255, 140) if self.client.latest_name not in ("Unknown", "NoLocalData", "RecognitionOff") else (0, 215, 255),
+                (90, 255, 140)
+                if self.client.latest_name not in ("Unknown", "NoLocalData", "RecognitionOff")
+                else (0, 215, 255),
                 2,
             )
         else:
@@ -577,6 +763,9 @@ class FederatedClientGUI:
                     (0, 0, 255),
                     2,
                 )
+
+        # Accumulate local FL stats for this frame
+        self.client.record_frame(face_found, ear, recognized, attempted_recognition)
 
         dialog = self.client.finalize_pattern_capture_if_needed()
         self.client.push_federated_update()
