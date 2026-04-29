@@ -15,10 +15,6 @@ from tensorflow.keras import layers, models
 
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
-EMBEDDING_IDX = [
-    1, 4, 10, 33, 61, 93, 127, 132, 152, 172, 199, 234,
-    263, 291, 323, 356, 389, 454,
-]
 
 
 def create_face_cnn_model(input_shape=(128, 128, 3), embedding_dim=128):
@@ -108,20 +104,6 @@ def _point(landmarks, idx: int, w: int, h: int) -> np.ndarray:
     return np.array([p.x * w, p.y * h, p.z * w], dtype=np.float32)
 
 
-def build_face_embedding(landmarks, width: int, height: int) -> np.ndarray:
-    nose = _point(landmarks, 1, width, height)
-    left_eye = _point(landmarks, 33, width, height)
-    right_eye = _point(landmarks, 263, width, height)
-    scale = np.linalg.norm(left_eye - right_eye) + 1e-6
-
-    vecs: List[float] = []
-    for idx in EMBEDDING_IDX:
-        p = _point(landmarks, idx, width, height)
-        normed = (p - nose) / scale
-        vecs.extend(normed.tolist())
-    emb = np.array(vecs, dtype=np.float32)
-    emb /= np.linalg.norm(emb) + 1e-9
-    return emb
 
 
 def _euclid(p1: np.ndarray, p2: np.ndarray) -> float:

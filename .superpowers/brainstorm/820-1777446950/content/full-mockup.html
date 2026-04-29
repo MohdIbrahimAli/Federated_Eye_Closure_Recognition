@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UI Mockup – Federated Eye Closure Recognition</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; padding: 24px; }
+
+  .window {
+    background: #f8fafc;
+    border-radius: 12px;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.18);
+    overflow: hidden;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  /* ── Title bar ── */
+  .titlebar {
+    background: #fff;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .titlebar-dot { width: 12px; height: 12px; border-radius: 50%; }
+  .titlebar-title { font-size: 13px; font-weight: 600; color: #1e293b; margin-left: 4px; flex: 1; }
+  .titlebar-badge {
+    background: #eff6ff; color: #2563eb; font-size: 11px; font-weight: 700;
+    padding: 2px 10px; border-radius: 999px; border: 1px solid #bfdbfe;
+  }
+
+  /* ── Top action bar ── */
+  .topbar {
+    background: #fff;
+    border-bottom: 2px solid #e2e8f0;
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .status-pill {
+    display: flex; align-items: center; gap: 6px;
+    background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 999px;
+    padding: 4px 12px;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; flex-shrink: 0; }
+  .status-pill span { font-size: 12px; font-weight: 600; color: #15803d; }
+
+  .stat-chip {
+    background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 4px 12px; display: flex; flex-direction: column; align-items: flex-start;
+  }
+  .stat-chip .label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.8px; color: #94a3b8; font-weight: 700; }
+  .stat-chip .value { font-size: 14px; font-weight: 700; color: #1e293b; line-height: 1.2; }
+  .stat-chip .value.blue { color: #2563eb; }
+  .stat-chip .value.amber { color: #d97706; }
+
+  .spacer { flex: 1; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: 600;
+    cursor: pointer; border: none; white-space: nowrap; transition: all 0.15s;
+  }
+  .btn-primary { background: #2563eb; color: #fff; box-shadow: 0 1px 3px rgba(37,99,235,0.3); }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-secondary { background: #fff; color: #475569; border: 1px solid #e2e8f0; }
+  .btn-success { background: #fff; color: #15803d; border: 1px solid #bbf7d0; }
+  .btn-warning { background: #fff; color: #92400e; border: 1px solid #fde68a; }
+  .btn-danger  { background: #fff; color: #b91c1c; border: 1px solid #fecaca; }
+  .btn-icon { font-size: 14px; }
+
+  /* ── Main content ── */
+  .main { display: flex; gap: 0; height: 620px; }
+
+  /* ── Video ── */
+  .video-area {
+    flex: 3; background: #0f172a; position: relative; overflow: hidden;
+  }
+  .video-placeholder {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 8px;
+  }
+  .cam-icon { font-size: 48px; opacity: 0.3; }
+  .cam-label { color: #475569; font-size: 13px; }
+
+  /* Overlays on video */
+  .video-overlay-tl {
+    position: absolute; top: 14px; left: 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .overlay-chip {
+    background: rgba(15,23,42,0.75); backdrop-filter: blur(4px);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+    padding: 4px 10px; display: flex; align-items: center; gap: 6px;
+  }
+  .overlay-chip span { color: #e2e8f0; font-size: 12px; font-weight: 600; }
+  .overlay-chip .hi { color: #60a5fa; }
+  .rec-badge {
+    position: absolute; top: 14px; right: 14px;
+    background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.4); border-radius: 6px;
+    padding: 4px 10px; display: flex; align-items: center; gap: 6px;
+  }
+  .rec-dot { width: 7px; height: 7px; border-radius: 50%; background: #ef4444; }
+  .rec-badge span { color: #fca5a5; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
+
+  .name-overlay {
+    position: absolute; bottom: 14px; left: 14px;
+    background: rgba(37,99,235,0.85); border-radius: 8px;
+    padding: 8px 14px;
+  }
+  .name-overlay .name { color: #fff; font-size: 16px; font-weight: 700; }
+  .name-overlay .dist { color: #bfdbfe; font-size: 11px; margin-top: 1px; }
+
+  /* ── Right column ── */
+  .sidebar {
+    flex: 1.4; background: #f8fafc; border-left: 1px solid #e2e8f0;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  .panel {
+    padding: 14px 16px;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .panel-title {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 1px; color: #94a3b8; margin-bottom: 10px;
+  }
+
+  /* FL panel */
+  .fl-panel { background: #eff6ff; border-bottom: 1px solid #bfdbfe; }
+  .fl-panel .panel-title { color: #3b82f6; }
+  .fl-countdown {
+    display: flex; align-items: center; justify-content: space-between;
+    background: #fff; border: 1px solid #bfdbfe; border-radius: 8px;
+    padding: 8px 12px; margin-bottom: 8px;
+  }
+  .fl-countdown .label { font-size: 11px; color: #64748b; }
+  .fl-countdown .timer { font-size: 18px; font-weight: 800; color: #2563eb; font-variant-numeric: tabular-nums; }
+  .fl-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .fl-key { font-size: 11px; color: #64748b; }
+  .fl-val { font-size: 11px; font-weight: 700; color: #1e293b; font-variant-numeric: tabular-nums; }
+
+  /* Status panel */
+  .status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .status-row:last-child { margin-bottom: 0; }
+  .s-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .s-label { font-size: 12px; color: #475569; flex: 1; }
+  .s-value { font-size: 12px; font-weight: 700; color: #1e293b; }
+
+  /* Model version */
+  .model-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+    padding: 6px 12px; margin-bottom: 8px;
+  }
+  .model-badge .mv { font-size: 12px; color: #94a3b8; }
+  .model-badge .mvv { font-size: 14px; font-weight: 700; color: #2563eb; }
+
+  /* Identities */
+  .id-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: #fff; border: 1px solid #e2e8f0; border-radius: 6px;
+    padding: 3px 8px; margin: 2px; font-size: 11px; color: #374151; font-weight: 600;
+  }
+
+  /* Message log */
+  .msg-log { flex: 1; padding: 14px 16px; overflow-y: auto; }
+  .msg { font-size: 11px; color: #64748b; padding: 4px 0; border-bottom: 1px solid #f1f5f9; line-height: 1.4; }
+  .msg .ts { color: #cbd5e1; margin-right: 6px; font-variant-numeric: tabular-nums; }
+  .msg.info .ts { color: #93c5fd; }
+  .msg.ok .ts { color: #86efac; }
+
+  /* Bottom status bar */
+  .statusbar {
+    background: #1e293b; padding: 5px 20px;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .statusbar span { font-size: 10px; color: #64748b; font-variant-numeric: tabular-nums; }
+  .statusbar .ok { color: #4ade80; }
+  .statusbar .dim { color: #334155; }
+
+  .note {
+    text-align: center; color: #64748b; font-size: 12px; margin-top: 18px;
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+
+<div class="window">
+
+  <!-- Title bar -->
+  <div class="titlebar">
+    <div class="titlebar-dot" style="background:#ef4444;"></div>
+    <div class="titlebar-dot" style="background:#f59e0b;"></div>
+    <div class="titlebar-dot" style="background:#22c55e;"></div>
+    <span class="titlebar-title">Federated Eye Closure Recognition — client1</span>
+    <span class="titlebar-badge">FL v3</span>
+  </div>
+
+  <!-- Top action bar -->
+  <div class="topbar">
+    <!-- Connection status -->
+    <div class="status-pill">
+      <div class="status-dot"></div>
+      <span>Hub Connected</span>
+    </div>
+
+    <!-- Live stats -->
+    <div class="stat-chip">
+      <span class="label">EAR</span>
+      <span class="value blue">0.312</span>
+    </div>
+    <div class="stat-chip">
+      <span class="label">Blinks/min</span>
+      <span class="value">18.5</span>
+    </div>
+    <div class="stat-chip">
+      <span class="label">Recognized</span>
+      <span class="value blue">Bilal</span>
+    </div>
+    <div class="stat-chip">
+      <span class="label">Rapid Closure</span>
+      <span class="value amber">NO</span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <!-- Action buttons -->
+    <button class="btn btn-primary"><span class="btn-icon">👤</span> Register Face</button>
+    <button class="btn btn-success"><span class="btn-icon">👁</span> Enable Recognition</button>
+    <button class="btn btn-warning"><span class="btn-icon">👁‍🗨</span> Set Blink Password</button>
+    <button class="btn btn-secondary"><span class="btn-icon">🔐</span> Verify</button>
+    <button class="btn btn-secondary"><span class="btn-icon">🔒</span> Lock File</button>
+    <button class="btn btn-danger"><span class="btn-icon">🔓</span> Unlock File</button>
+  </div>
+
+  <!-- Main content -->
+  <div class="main">
+
+    <!-- Video feed -->
+    <div class="video-area">
+      <div class="video-placeholder">
+        <div class="cam-icon">📷</div>
+        <div class="cam-label">Live Camera Feed</div>
+      </div>
+
+      <!-- Overlays -->
+      <div class="video-overlay-tl">
+        <div class="overlay-chip">
+          <span>EAR: <span class="hi">0.312</span></span>
+        </div>
+        <div class="overlay-chip">
+          <span>Client: <span class="hi">client1</span></span>
+        </div>
+      </div>
+
+      <div class="rec-badge">
+        <div class="rec-dot"></div>
+        <span>RECOGNIZING</span>
+      </div>
+
+      <div class="name-overlay">
+        <div class="name">Bilal</div>
+        <div class="dist">dist: 0.142 · confident</div>
+      </div>
+    </div>
+
+    <!-- Right sidebar -->
+    <div class="sidebar">
+
+      <!-- FL Activity panel -->
+      <div class="panel fl-panel">
+        <div class="panel-title">⚡ Federated Learning Activity</div>
+        <div class="fl-countdown">
+          <span class="label">Next FL push in</span>
+          <span class="timer">08s</span>
+        </div>
+        <div class="fl-row"><span class="fl-key">Last ear_open sent</span><span class="fl-val">0.3104</span></div>
+        <div class="fl-row"><span class="fl-key">Blinks/min sent</span><span class="fl-val">18.5</span></div>
+        <div class="fl-row"><span class="fl-key">Face detection rate</span><span class="fl-val">0.92</span></div>
+        <div class="fl-row"><span class="fl-key">Global ear_thr ←</span><span class="fl-val" style="color:#2563eb;">0.2158</span></div>
+        <div class="fl-row"><span class="fl-key">Global rec_thr ←</span><span class="fl-val" style="color:#2563eb;">0.3384</span></div>
+        <div class="fl-row"><span class="fl-key">Frames this round</span><span class="fl-val">450</span></div>
+      </div>
+
+      <!-- Live status -->
+      <div class="panel">
+        <div class="panel-title">Live Status</div>
+
+        <div class="model-badge">
+          <span class="mv">Model</span>
+          <span class="mvv">v3</span>
+          <span class="mv">·</span>
+          <span class="mv">face_thr</span>
+          <span class="mvv">0.338</span>
+          <span class="mv">·</span>
+          <span class="mv">blink_thr</span>
+          <span class="mvv">0.216</span>
+        </div>
+
+        <div class="status-row">
+          <div class="s-dot" style="background:#22c55e;"></div>
+          <span class="s-label">Blink capture</span>
+          <span class="s-value">Idle</span>
+        </div>
+        <div class="status-row">
+          <div class="s-dot" style="background:#2563eb;"></div>
+          <span class="s-label">Recognition mode</span>
+          <span class="s-value">ON</span>
+        </div>
+        <div class="status-row">
+          <div class="s-dot" style="background:#22c55e;"></div>
+          <span class="s-label">Brightness</span>
+          <span class="s-value">127.3</span>
+        </div>
+
+        <div style="margin-top:10px;">
+          <div class="panel-title" style="margin-bottom:6px;">Registered Identities</div>
+          <span class="id-chip">👤 Bilal</span>
+          <span class="id-chip">👤 Inaam</span>
+        </div>
+      </div>
+
+      <!-- Message log -->
+      <div class="msg-log">
+        <div class="panel-title" style="margin-bottom:8px;">Activity Log</div>
+        <div class="msg ok"><span class="ts">14:32:01</span>FL round 3 complete. ear_thr=0.2158 rec_thr=0.3384</div>
+        <div class="msg info"><span class="ts">14:31:46</span>Connected to hub. Model v3</div>
+        <div class="msg"><span class="ts">14:31:44</span>Registered local identity: Inaam</div>
+        <div class="msg"><span class="ts">14:31:30</span>FL round 2 complete. ear_thr=0.2201 rec_thr=0.3370</div>
+        <div class="msg"><span class="ts">14:31:15</span>Recognition enabled.</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Bottom status bar -->
+  <div class="statusbar">
+    <span class="ok">● Connected</span>
+    <span class="dim">|</span>
+    <span>client1 · 127.0.0.1:9000</span>
+    <span class="dim">|</span>
+    <span>data/client1</span>
+    <span class="dim">|</span>
+    <span>Frames: 1,247</span>
+  </div>
+
+</div>
+
+<p class="note">This is a mockup — click to approve or let me know what to change</p>
+
+<script>
+// Make the window clickable to "approve"
+document.querySelector('.window').addEventListener('click', function() {
+  if (window.__selectOption) window.__selectOption('approved', 'Design approved');
+});
+</script>
+</body>
+</html>
