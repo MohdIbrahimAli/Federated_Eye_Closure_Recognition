@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Dict
 
 HOST = "127.0.0.1"
-PORT = 9000
+PORT = 9001
 
 
 @dataclass
